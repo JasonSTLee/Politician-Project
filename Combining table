@@ -1,0 +1,30 @@
+CREATE TABLE politician_raw AS
+with house as (
+	SELECT
+		*
+	FROM
+		house_raw
+	WHERE
+		ticker is NOT NULL
+), senator as (
+	SELECT
+		*
+	FROM
+		senator_raw
+	WHERE
+		type is NOT NULL
+), full_table as (
+	SELECT
+		transaction_date, disclosure_date, ticker, asset_description, type, amount, senator, party, district, state, industry, sector
+	FROM
+		house
+	UNION ALL
+	SELECT
+		transaction_date, disclosure_date, ticker, asset_description, type, amount, senator, party, NULL AS district , state, industry, sector
+	FROM
+		senator
+)
+SELECT
+	*
+FROM
+	full_table;
