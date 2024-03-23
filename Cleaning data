@@ -1,0 +1,271 @@
+with cte as (
+	SELECT
+		DISTINCT(ticker),
+		transaction_date,
+		disclosure_date
+	FROM
+		politician_raw
+)
+SELECT
+	row_number() OVER (order by ticker),
+	UPPER(ticker),
+	TO_CHAR((MIN(transaction_date)), 'MM-DD-YYYY') min_date,
+	TO_CHAR((MAX(disclosure_date)),'MM-DD-YYYY') max_date
+FROM
+	cte
+GROUP BY 
+	ticker
+
+
+
+
+SELECT
+	DISTINCT(ticker)
+FROM
+	politician_raw
+WHERE
+	ticker LIKE '%.%' OR ticker LIKE '%$%' 
+	
+SELECT
+	DISTINCT(ticker)
+FROM
+	politician_raw
+WHERE
+	ticker LIKE '%BAC%'
+
+SELECT
+	*
+FROM
+	politician_raw
+WHERE
+	ticker = 'XER.BE'
+
+
+
+
+UPDATE politician_raw
+SET ticker = 'XRX'
+WHERE ticker = 'XER.BE';
+
+UPDATE politician_raw
+SET ticker = 'RDS'
+WHERE ticker = 'RDSA.AS';	
+
+UPDATE politician_raw
+SET ticker = 'NEE'
+WHERE ticker = 'NEE$Q';
+
+UPDATE politician_raw
+SET ticker = 'LSXMA'
+WHERE ticker = 'LM09.SG';
+
+UPDATE politician_raw
+SET ticker = 'KEY'
+WHERE ticker = 'KEY$J';
+
+UPDATE politician_raw
+SET ticker = 'INSW'
+WHERE ticker = 'INSW.V';
+
+UPDATE politician_raw
+SET ticker = 'TDY'
+WHERE ticker = 'FL4.SG';
+
+UPDATE politician_raw
+SET ticker = 'ETWO'
+WHERE ticker = 'ETWO.W';
+
+UPDATE politician_raw
+SET ticker = 'DUK'
+WHERE ticker = 'DUK$A';
+
+UPDATE politician_raw
+SET ticker = 'COF'
+WHERE ticker = 'COF$I';
+
+UPDATE politician_raw
+SET ticker = 'CADE'
+WHERE ticker = 'CADE$A';
+
+UPDATE politician_raw
+SET ticker = 'AVGO'
+WHERE ticker = 'Broadcom Inc.';
+
+UPDATE politician_raw
+SET ticker = 'CADE'
+WHERE ticker = 'BXS$A';
+
+UPDATE politician_raw
+SET ticker = 'BAC'
+WHERE ticker = 'BAC.PL';
+
+UPDATE politician_raw
+SET ticker = 'BAC'
+WHERE ticker = 'BAC$K';
+
+UPDATE politician_raw
+SET ticker = 'CB'
+WHERE ticker = 'AEX.MU';
+
+UPDATE politician_raw
+SET ticker = 'ADT'
+WHERE ticker = 'ADT.F';
+
+UPDATE politician_raw
+SET ticker = 'AAIC'
+WHERE ticker = 'AAIC$B';
+
+UPDATE politician_raw
+SET ticker = 'AAL'
+WHERE ticker = 'AAl';
+
+UPDATE politician_raw
+SET ticker = 'APPL'
+WHERE ticker = 'AAPl';
+
+UPDATE politician_raw
+SET ticker = 'APO'
+WHERE ticker = 'AAM$A';
+
+DELETE FROM	
+	politician_raw
+WHERE 
+	ticker = 'MSTY.PA';
+	
+DELETE FROM	
+	politician_raw
+WHERE 
+	ticker = 'MS$P';
+
+DELETE FROM	
+	politician_raw
+WHERE 
+	ticker = 'AAWW';
+
+DELETE FROM	
+	politician_raw
+WHERE 
+	ticker = 'PCPL';
+	
+DELETE FROM	
+	politician_raw
+WHERE 
+	ticker = 'ZNGA.SW';
+	
+DELETE FROM	
+	politician_raw
+WHERE 
+	ticker = '^RGP';
+
+DELETE FROM	
+	politician_raw
+WHERE 
+	ticker = '^MWE';
+	
+DELETE FROM	
+	politician_raw
+WHERE 
+	ticker = '0QZI.IL';
+
+DELETE FROM	
+	politician_raw
+WHERE 
+	ticker = '35G.SG'
+
+DELETE FROM	
+	politician_raw
+WHERE 
+	ticker = '3V64.TI'
+
+DELETE FROM	
+	politician_raw
+WHERE 
+	ticker = '7XY'
+
+DELETE FROM	
+	politician_raw
+WHERE 
+	ticker = 'AAIC'
+ 
+-- Finding any mistmatched industry/sectors based on ticker
+SELECT
+ 	p1.ticker,
+	CASE
+		WHEN p1.industry != p2.industry OR p1.sector != p2.sector THEN 'Different industry/sector'
+		ELSE NULL END
+FROM
+	politician_raw p1
+JOIN
+	politician_raw p2 ON p1.ticker = p2.ticker 
+	and
+	p1.transaction_date = p2.transaction_date
+ORDER BY
+	2 DESC
+
+-- Cleaning up the table and creating a new one
+
+CREATE TABLE politician
+as(
+with cte1 AS (
+	SELECT
+		DISTINCT ON (p1.ticker)
+		p1.ticker, 
+		CASE 
+			WHEN LENGTH(p1.asset_description) < LENGTH(p2.asset_description) THEN p1.asset_description 
+			ELSE p2.asset_description END as shorter_description
+	FROM
+		politician_raw p1
+	JOIN
+		politician_raw p2 ON p1.ticker = p2.ticker
+), cte2 AS (
+	SELECT
+		transaction_date, disclosure_date, p.ticker, shorter_description, type, amount, senator, party, district, state, industry, sector
+	FROM
+		politician_raw p
+	JOIN
+		cte1 c ON c.ticker = p.ticker
+)
+SELECT
+	row_number () over () as transaction_id,
+	transaction_date,
+	disclosure_date,
+	UPPER(ticker),
+	shorter_description,
+	CASE
+		WHEN type = 'Exchange' THEN 'exchange'
+		WHEN type = 'exchange' THEN 'exchange'
+		WHEN type = 'purchase' THEN 'purchase'
+		WHEN type = 'sale_full' THEN 'sale_full'
+		WHEN type = 'sale_partial' THEN 'sale_partial'
+		WHEN type = 'sale' THEN 'sale_full'
+		ELSE NULL END as type_1,
+	CASE 
+		WHEN amount = '$1,001 -' THEN (1000)::integer
+		WHEN amount = '$1,001 - $15,000' THEN (15000)::integer 
+		WHEN amount = '$1,000 - $15,000' THEN (15000)::integer
+		WHEN amount = '$15,001 - $50,000' THEN (50000)::integer
+		WHEN amount = '$15,000 - $50,000' THEN (50000)::integer
+		WHEN amount = '$50,001 - $100,000' THEN (100000)::integer
+		WHEN amount = '$100,001 - $250,000' THEN (250000)::integer
+		WHEN amount = '$250,001 - $500,000' THEN (500000)::integer
+		WHEN amount = '$500,001 - $1,000,000' THEN (1000000)::integer
+		WHEN amount = '$1,000,000 - $5,000,000' THEN (5000000)::integer
+		WHEN amount = '$1,000,001 - $5,000,000' THEN (5000000)::integer
+		WHEN amount = '$5,000,001 - $25,000,000' THEN (25000000)::integer
+		WHEN amount = '$25,000,001 - $50,000,000' THEN (50000000)::integer
+		ELSE NULL END as amount_integer,
+	senator,
+	party,
+	district,
+	state,
+	industry,
+	sector
+FROM
+	cte2)
+
+
+ 
+ 
+
+
+

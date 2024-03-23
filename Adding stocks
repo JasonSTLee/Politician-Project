@@ -1,0 +1,31 @@
+with cte as (
+	SELECT
+		DISTINCT(ticker),
+		transaction_date,
+		disclosure_date
+	FROM
+		politician_raw
+)
+SELECT
+	row_number() OVER (order by ticker),
+	ticker,
+	TO_CHAR((MIN(transaction_date) + 365), 'MM-DD-YYYY') min_date,
+	TO_CHAR(MAX(disclosure_date),'MM-DD-YYYY') max_date
+FROM
+	cte
+GROUP BY
+	2
+	
+
+
+
+SELECT
+	*
+FROM
+	politician_raw
+WHERE
+ticker = 'AAIC$B'
+
+UPDATE politician_raw
+SET ticker = 'AAIC'
+WHERE ticker = 'AAIC$B';
