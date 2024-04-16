@@ -6,7 +6,6 @@
 - Google Sheets 
 - PostgreSQL
 - Tableau
-- Python
-- Cloud Service
+
 
 ### This project aims to showcase my skills with the above mentioned tools and to craft a data-driven story that uncovers insights previously unknown. 
