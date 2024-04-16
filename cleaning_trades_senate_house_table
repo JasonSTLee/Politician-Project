@@ -1,0 +1,594 @@
+-- Cleaning up the table and creating a new one
+
+CREATE TABLE politician
+as(
+with cte1 AS (
+	SELECT
+		DISTINCT ON (p1.ticker)
+		p1.ticker, 
+		CASE 
+			WHEN LENGTH(p1.asset_description) < LENGTH(p2.asset_description) THEN p1.asset_description 
+			ELSE p2.asset_description END as shorter_description
+	FROM
+		politician_raw p1
+	JOIN
+		politician_raw p2 ON p1.ticker = p2.ticker
+), cte2 AS (
+	SELECT
+		transaction_date, disclosure_date, p.ticker, shorter_description, type, amount, senator, party, district, state, industry, sector
+	FROM
+		politician_raw p
+	JOIN
+		cte1 c ON c.ticker = p.ticker
+)
+SELECT
+	row_number () over () as transaction_id,
+	transaction_date,
+	disclosure_date,
+	UPPER(ticker),
+	shorter_description,
+	CASE
+		WHEN type = 'Exchange' THEN 'exchange'
+		WHEN type = 'exchange' THEN 'exchange'
+		WHEN type = 'purchase' THEN 'purchase'
+		WHEN type = 'sale_full' THEN 'sale_full'
+		WHEN type = 'sale_partial' THEN 'sale_partial'
+		WHEN type = 'sale' THEN 'sale_full'
+		ELSE NULL END as type_1,
+	CASE 
+		WHEN amount = '$1,001 -' THEN (1000)::integer
+		WHEN amount = '$1,001 - $15,000' THEN (15000)::integer 
+		WHEN amount = '$1,000 - $15,000' THEN (15000)::integer
+		WHEN amount = '$15,001 - $50,000' THEN (50000)::integer
+		WHEN amount = '$15,000 - $50,000' THEN (50000)::integer
+		WHEN amount = '$50,001 - $100,000' THEN (100000)::integer
+		WHEN amount = '$100,001 - $250,000' THEN (250000)::integer
+		WHEN amount = '$250,001 - $500,000' THEN (500000)::integer
+		WHEN amount = '$500,001 - $1,000,000' THEN (1000000)::integer
+		WHEN amount = '$1,000,000 - $5,000,000' THEN (5000000)::integer
+		WHEN amount = '$1,000,001 - $5,000,000' THEN (5000000)::integer
+		WHEN amount = '$5,000,001 - $25,000,000' THEN (25000000)::integer
+		WHEN amount = '$25,000,001 - $50,000,000' THEN (50000000)::integer
+		ELSE NULL END as amount_integer,
+	senator,
+	party,
+	district,
+	state,
+	industry,
+	sector
+FROM
+	cte2)
+
+
+-- Finding any transactions from trades that don't have prices in stock_prices 
+
+	-- Below is the formula to calculate how many transactions will be lost in total and per politician, the average missing transactions and the average % of missing transactions
+with cte as (
+	SELECT
+		t.politician, COUNT(*) missing_transactions
+	FROM 
+		trades t
+	LEFT JOIN
+		stock_prices s on s.ticker = t.ticker and s.ticker_date = t.transaction_date
+	WHERE 
+		s.ticker_date is null
+	GROUP BY
+		1
+), cte2 as (
+	SELECT
+		t.politician, COUNT(*) total_transactions
+	FROM 
+		trades t
+	GROUP BY
+		1
+), cte3 as (
+	SELECT	
+		c.politician, missing_transactions, total_transactions, 
+		(total_transactions - missing_transactions) remaining_usable_transactions, 
+		ROUND(((missing_transactions::numeric / total_transactions::numeric) * 100),2) percentage_of_unusable_transactions
+	FROM
+		cte c
+	JOIN
+		cte2 c2 on c.politician = c2.politician
+)
+SELECT
+	AVG(remaining_usable_transactions) avg_missing_transactions, -- 50 is the average transactions that are missing per politician
+	AVG(percentage_of_unusable_transactions) avg_percentage_of_missing_transactions -- 62% is how much the average percentage of unusable transactions there are
+FROM
+	cte3
+
+
+--Delete the transaction_id's that don't have close prices 
+
+
+	-- 9331 transactions were deleted. It went from 18k to 5k after deleting everyting
+	-- I went from 125 to 118 politicians
+
+DELETE FROM trades
+WHERE transaction_id IN(
+	SELECT
+		t.transaction_id
+	FROM 
+		trades t
+	LEFT JOIN
+		stock_prices s on s.ticker = t.ticker and s.ticker_date = t.transaction_date
+	WHERE 
+		s.ticker_date is null
+
+	
+-- There are senators that only have sale transaction_type which means we wouldn't be able to track when they bought the stock. Delete these politicians
+
+
+DELETE FROM trades
+WHERE politician IN(with cte as (
+							SELECT
+								politician,
+								COUNT(*)::numeric all_count,
+								(SUM(CASE WHEN transaction_type = 'sale' THEN 1 ELSE 0 END))::numeric sales_count
+							FROM
+								trades
+							GROUP BY
+								1
+							)
+						SELECT
+							politician
+						FROM
+							cte
+						WHERE 
+							ROUND(((sales_count / all_count) * 100),2) = 100.00)
+
+
+-- I needed to find sales transactions that occurred the purchase entry so I could delete those. 
+-- The below formula utilizes lag to do this.
+-- The problem is that lag only accounts for 1 position before, when there could be multiple prior sales transactions
+
+
+with cte as (
+	SELECT
+		politician, transaction_date, ticker,
+		LAG(transaction_type) OVER(PARTITION BY politician, ticker ORDER BY transaction_date) prior_transaction_type,
+		transaction_type current_transaction_type, 
+		CASE 
+			WHEN transaction_type = 'sale' and LAG(transaction_type) OVER(PARTITION BY ticker ORDER BY transaction_date) = 'purchase' THEN 1 ELSE 0 END flag
+	FROM
+		trades t1
+	WHERE
+		politician NOT IN (SELECT
+								total_counts.politician
+							FROM
+								(SELECT
+									politician,
+									COUNT(*) AS total_transactions
+								FROM
+									trades
+								GROUP BY
+									politician) AS total_counts
+							LEFT JOIN
+								(SELECT
+									politician,
+									COUNT(*) AS purchase_transactions
+								FROM
+									trades
+								WHERE
+									transaction_type = 'purchase'
+								GROUP BY
+									politician) AS purchase_counts
+							ON
+								total_counts.politician = purchase_counts.politician
+							WHERE
+								purchase_transactions = total_transactions)
+), cte2 as (
+	SELECT
+		politician,
+		SUM(flag) sales_with_prior_purchases,
+		SUM(CASE WHEN current_transaction_type = 'sale' and prior_transaction_type is null or prior_transaction_type = 'sale' THEN 1 ELSE 0 END) sales_with_no_prior_purchase,
+		(SUM(flag)) + (SUM(CASE WHEN current_transaction_type = 'sale' and prior_transaction_type is null or prior_transaction_type = 'sale' THEN 1 ELSE 0 END)) total_sales,
+		ROUND(((SUM(flag)::numeric / ((SUM(flag)) + (SUM(CASE WHEN current_transaction_type = 'sale' and prior_transaction_type is null or prior_transaction_type = 'sale' THEN 1 ELSE 0 END)))::numeric)*100),2) percentage_of_usable_sales
+	FROM
+		cte
+	GROUP BY
+		1
+)
+SELECT
+	politician
+FROM
+	cte2
+WHERE
+	sales_with_prior_purchases = 0
+
+	
+-- Below is the number of usable trades out of total trades per politician
+	-- Usable is defined as trades where there is a purchase entry before the sale of a stock
+
+
+with cte as (
+	SELECT
+		politician,
+		ticker,
+		MIN(CASE
+			WHEN transaction_type = 'purchase' THEN transaction_date END) as min_purchase_date,
+		MIN(CASE
+			WHEN transaction_type = 'sale' THEN transaction_date END) as min_sale_date
+	FROM
+		trades
+	WHERE
+		politician NOT IN (SELECT total_counts.politician
+							FROM
+								(SELECT politician, COUNT(*) AS total_transactions
+								FROM trades
+								GROUP BY politician) AS total_counts
+							LEFT JOIN
+								(SELECT politician, COUNT(*) AS purchase_transactions
+								FROM trades
+								WHERE transaction_type = 'purchase'
+								GROUP BY politician) AS purchase_counts
+								ON total_counts.politician = purchase_counts.politician
+								WHERE purchase_transactions = total_transactions)
+	GROUP BY
+		1,2
+	ORDER BY
+		1,2
+), cte2 as (
+	SELECT
+		politician,
+		SUM(CASE 
+				WHEN min_sale_date = min_purchase_date or min_purchase_date < min_sale_date THEN 1 ELSE 0 END)::numeric as co_tickers_with_purchase_entry,
+		SUM(CASE 
+				WHEN min_sale_date < min_purchase_date or min_purchase_date is null THEN 1 ELSE 0 END)::numeric as co_tickers_without_purchase_entry
+	FROM
+		cte
+	GROUP BY
+		1
+)
+SELECT
+	*, (co_tickers_with_purchase_entry + co_tickers_without_purchase_entry) as total_ticker_entries,
+	ROUND(((co_tickers_with_purchase_entry / (co_tickers_with_purchase_entry + co_tickers_without_purchase_entry))* 100),2) as percentage_of_usable_trades
+FROM
+	cte2
+	
+	
+-- Delete transactions that have sales prior to or on the same day as the purchases. Deleting this because there is no way to calculate these sales in the weighted portfolio performance
+
+
+DELETE FROM trades
+WHERE transaction_id IN (
+with cte as (
+	SELECT
+		politician,
+		ticker,
+		MIN(CASE WHEN transaction_type = 'purchase' THEN transaction_date END) min_purchase_date_per_ticker
+	FROM
+		trades
+	GROUP BY
+		1,2
+), cte2 as (
+	SELECT
+		c.politician, c.ticker, t.transaction_id, CASE WHEN t.transaction_type = 'sale' THEN t.transaction_date END as sale_dates, c.min_purchase_date_per_ticker
+	FROM
+		trades t
+	LEFT JOIN 
+		cte c on c.politician = t.politician and c.ticker = t.ticker
+)
+SELECT
+	transaction_id
+FROM	
+	cte2
+WHERE
+	sale_dates = min_purchase_date_per_ticker or
+	sale_dates < min_purchase_date_per_ticker)
+
+
+-- Fixing politicians that have the multiple districts. This will help when normalizing the database to help have a unique primary key.
+	
+
+with cte as (
+	SELECT DISTINCT
+		politician,
+		district
+	FROM
+		trades
+), cte2 as (
+	SELECT
+		politician, district,
+		ROW_NUMBER () OVER (PARTITION BY politician) row_num
+	FROM 
+		cte
+)
+SELECT
+	politician, district
+FROM	
+	cte2
+WHERE
+	row_num = 2
+
+
+SELECT distinct
+	politician, district
+FROM
+	trades
+WHERE
+	politician = 'Pete Sessions'
+
+
+UPDATE trades
+SET district = 'TX17'
+WHERE district = 'TX32' and politician = 'Pete Sessions'
+
+
+-- Normalize tables
+	-- Created politician table that has separate info from trades table
+	-- Created ticker table
+	-- Created trades table (out of trades_raw)
+
+
+CREATE TABLE politician AS (
+SELECT DISTINCT
+	(politician),
+	(party),
+	(DISTRICT),
+	CASE WHEN district is null THEN 'senator' ELSE 'house' END as congress_type,
+	state
+FROM
+	trades)
+
+ALTER TABLE politician
+ALTER COLUMN party TYPE VARCHAR(200);
+
+ALTER TABLE politician
+ADD PRIMARY KEY (politician)
+
+
+	-- Created trades table (out of trades_raw)
+
+CREATE TABLE trades AS (
+select transaction_id, transaction_date, disclosure_date, ticker, transaction_type, amount, politician from trades_raw
+)
+
+
+ALTER TABLE trades
+ALTER COLUMN transaction_id TYPE integer;
+
+ALTER TABLE trades
+ADD PRIMARY KEY (transaction_id)
+
+
+	-- Created ticker table
+	-- There are the same tickers with different industry/sector
+
+
+CREATE TABLE ticker AS (
+with cte as (
+	SELECT
+		t1.ticker,
+		CASE 
+			WHEN t1.industry < t2.industry THEN t2.industry ELSE t1.industry END new_industry,
+		CASE 
+			WHEN t1.sector < t2.sector THEN t2.sector ELSE t1.sector END new_sector
+	FROM
+		trades_raw t1
+JOIN
+	trades_raw t2 on t1.ticker = t2.ticker
+), cte2 as (
+	SELECT
+		distinct ticker, new_industry, new_sector,
+		ROW_NUMBER () OVER (PARTITION BY ticker ORDER BY ticker) row_num
+	FROM
+		cte
+)
+SELECT
+	ticker, new_industry, new_sector
+FROM
+	cte2 
+WHERE
+	row_num = 1)
+
+
+ALTER TABLE ticker
+ADD PRIMARY KEY (ticker)
+
+
+ALTER TABLE trades
+ALTER COLUMN ticker TYPE VARCHAR(200);
+
+
+-- Below is the same output (ideally) but using coalesce. I don't like it because my formula compares the length of the 2 values and picks the longer one. If there is a spelling error (tech vs technology) then the longer one would be used.
+
+
+WITH cte AS (
+    SELECT
+        t1.ticker,
+        COALESCE(t2.industry, t1.industry) AS new_industry,
+        COALESCE(t2.sector, t1.sector) AS new_sector
+    FROM
+        trades_raw t1
+    LEFT JOIN
+        trades_raw t2 ON t1.ticker = t2.ticker
+), cte2 AS (
+    SELECT
+        DISTINCT ticker,
+        new_industry,
+        new_sector,
+        ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY ticker) AS row_num
+    FROM
+        cte
+)
+SELECT
+    ticker,
+    new_industry,
+    new_sector
+FROM
+    cte2
+WHERE
+    row_num = 1;
+
+
+-- Delete sales with no purchase entries for each ticker for every politician
+
+-- Find the tickers with only sales because 
+	-- Find the count of sale transactions per ticker 
+	-- Find the count of total transactions per ticker
+	-- Compare the numbers and if they're the same 
+
+
+with cte as (
+	SELECT
+		politician,
+		ticker,
+		SUM(CASE WHEN transaction_type = 'sale' THEN 1 ELSE 0 END) sale_transactions_per_ticker,
+		SUM(CASE WHEN transaction_type = 'sale' or transaction_type = 'purchase' THEN 1 ELSE 0 END) total_transactions_per_ticker
+	FROM	
+		trades
+	GROUP BY
+		1,2
+	HAVING
+		(SUM(CASE WHEN transaction_type = 'sale' THEN 1 ELSE 0 END)) = (SUM(CASE WHEN transaction_type = 'sale' or transaction_type = 'purchase' THEN 1 ELSE 0 END))
+), cte2 as (
+	SELECT
+		c.politician, COUNT(c.ticker) unusable_tickers
+	FROM
+		cte c
+	GROUP BY 1
+), cte3 as (
+	SELECT
+		politician, COUNT(ticker) all_tickers
+	FROM
+		trades
+	GROUP BY
+		1
+)
+SELECT
+	cte3.politician, COALESCE(unusable_tickers,0) unusable_tickers, all_tickers, COALESCE(ROUND(((unusable_tickers::numeric) / (all_tickers::numeric) * 100),2),0) percentage_of_unusable_tickers
+FROM
+	cte2 
+FULL JOIN
+	cte3 ON cte3.politician = cte2.politician
+
+	
+-- The above formula was supposed to find just the tickers with no purchase entry but I went off the rails and found the percentage of usable tickers per politician.
+
+
+-- Find the tickers with only sales because 
+	-- Find the count of sale transactions per ticker 
+	-- Find the count of total transactions per ticker
+	-- Compare the numbers and if they're the same 
+
+
+DELETE FROM trades
+WHERE transaction_id IN (
+	with cte as (
+		SELECT
+			politician,
+			ticker,
+			SUM(CASE WHEN transaction_type = 'sale' THEN 1 ELSE 0 END) sale_transactions_per_ticker,
+			SUM(CASE WHEN transaction_type = 'sale' or transaction_type = 'purchase' THEN 1 ELSE 0 END) total_transactions_per_ticker
+		FROM	
+			trades
+		GROUP BY
+			1,2
+		HAVING
+			(SUM(CASE WHEN transaction_type = 'sale' THEN 1 ELSE 0 END)) = (SUM(CASE WHEN transaction_type = 'sale' or transaction_type = 'purchase' THEN 1 ELSE 0 END))
+	)
+	SELECT
+		t.transaction_id
+	FROM
+		cte c
+	JOIN
+		trades t on c.politician = t.politician and c.ticker = t.ticker
+)
+
+
+
+
+-- After deleting and cleaning the data the number of transactions went from 18k to 5k after deleting everyting and politicians reduced from 125 to 118 politicians
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

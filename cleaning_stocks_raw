@@ -1,0 +1,181 @@
+
+-- Cleaning up stocks table 
+	-- Finding transactions (from trades table) that don't have corresponding prices in the stocks table
+		-- Delete any congresssman missing more than 50% of their portfolio, if less than 50% than delete the transactions
+	-- Deleting rows in stocks table that are 180 days below the min(transaction_date) and 180 days above the max(ticker_date)
+
+
+-- Add id's to the stocks_raw 
+
+
+CREATE TABLE stock_prices_2 AS (
+	SELECT	
+		ROW_NUMBER() OVER() id,
+		*
+	FROM
+		stocks_raw
+)
+
+
+-- Calculate the percentage of how much is missing from congressman's portfolio. Delete transactions since no congressman was missing 50% or more from their portfolio
+
+
+with missing_transactions as (
+	SELECT
+		t.senator missing_senator,
+		COUNT(t.transaction_id)::numeric no_missing_transactions
+	FROM
+		trades t
+	LEFT JOIN
+		stocks_raw s ON t.ticker = s.ticker AND t.transaction_date = s.ticker_date
+	WHERE
+		s.ticker_date IS null
+	GROUP BY
+		1
+), total_transactions as (
+	SELECT
+		senator,
+		COUNT(*)::numeric total_transactions
+	FROM
+		trades
+	GROUP BY
+		1
+)
+SELECT
+	senator,
+	ROUND((no_missing_transactions / total_transactions * 100), 2)
+FROM
+	missing_transactions m
+JOIN
+	total_transactions t ON m.missing_senator = t.senator
+ORDER BY
+	2 DESC
+
+
+-- Since this will lower the amount of transactions for some congressman I then find politicians that have less than 6 transactions to delete them
+
+
+with cte as (
+SELECT
+	senator,
+	COUNT(transaction_id)
+FROM
+	trades
+GROUP BY
+	1
+HAVING 
+	COUNT(transaction_id) < 6
+ORDER BY
+	1
+)
+SELECT
+	t.senator, t.amount
+FROM
+	trades t
+JOIN
+	cte ON cte.senator = t.senator
+ORDER BY
+	2 DESC
+
+
+-- Find the ID's in stock_prices_2 that are 180 before the earliest transaction_date so you can delete them
+-- After finding the s.tickers with more than 180 unnecessary days, find all the days to delete from each ticker
+
+
+DELETE FROM
+	stock_prices_2
+WHERE
+	id IN (with cte as (
+				SELECT
+					t.ticker,
+					MIN(t.transaction_date) earliest_transaction_date,
+					MIN(s.ticker_date) earliest_price_date,
+					(MIN(t.transaction_date) - MIN(s.ticker_date)) days_difference
+				FROM
+					trades t
+				RIGHT JOIN
+					stock_prices_2 s ON s.ticker=t.ticker
+				GROUP BY
+					1
+				HAVING
+					(MIN(t.transaction_date) - MIN(s.ticker_date)) > 181
+			), cte2 as (
+				SELECT
+					cte.ticker,
+					s.ticker_date,
+					s.id,
+					ROW_NUMBER() OVER(PARTITION BY cte.ticker ORDER BY s.ticker_date DESC) days
+				FROM
+					cte
+				JOIN
+					stock_prices_2 s ON s.ticker = cte.ticker
+			)
+			SELECT
+				id
+			FROM
+				cte2
+			WHERE 
+				days > 181)
+
+
+DELETE FROM
+	stocks
+WHERE
+	id IN (with cte as (
+				SELECT
+					t.ticker,
+					MAX(t.transaction_date) latest_transaction_date,
+					MAX(s.ticker_date) latest_price_date,
+					(MAX(s.ticker_date) - MAX(t.transaction_date)) days_difference
+				FROM
+					trades t
+				RIGHT JOIN
+					stocks s ON s.ticker = t.ticker
+				GROUP BY
+					1
+				HAVING
+					(MAX(s.ticker_date) - MAX(t.transaction_date)) > 181
+			), cte2 as (
+				SELECT
+					cte.ticker,
+					s.ticker_date,
+					s.id,
+					ROW_NUMBER() OVER(PARTITION BY cte.ticker ORDER BY s.ticker_date ASC) days
+				FROM
+					cte
+				JOIN
+					stocks s ON s.ticker = cte.ticker
+			)
+			SELECT
+				id
+			FROM
+				cte2
+			WHERE 
+				days > 181)
+	
+
+-- Finding any transactions from trades that don't have prices in stock_prices to double check
+
+
+SELECT
+	transaction_id
+FROM	
+	trades t
+FULL JOIN
+	stocks s ON s.ticker = t.ticker 
+WHERE
+	s.ticker_date IS null
+
+
+
+
+
+	
+
+
+
+
+
+
+
+

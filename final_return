@@ -1,0 +1,246 @@
+-- This is the formula calculated to find the return for every politician, accounting for the weight and return of each ticker per politician.
+-- I first calculated the weight and then the return of each ticker per politician, but finding return was difficult because there were 3 types of politicians and each had their own formula
+ 	-- The 3 segments: (1) politicians that have purchased and not sold their ticker (2) politicians that have purchased and sold partials amounts (3) politicians that have purchased and sold all
+
+
+
+CREATE TABLE politician_return AS (
+-- Below is the formula/ctes to find the weight of tickers per politician
+	with weight_cte as (
+		SELECT
+			t.politician, t.ticker, t.transaction_type,
+			SUM(CASE WHEN t.transaction_type = 'purchase' THEN (t.amount / s.close) END) shares_purchase,
+			SUM(CASE WHEN t.transaction_type = 'sale' THEN -(t.amount / s.close) END) shares_sale
+		FROM
+			trades t 
+		JOIN
+			stock_prices s on t.ticker = s.ticker and t.transaction_date = s.ticker_date
+		GROUP BY
+			1,2,3
+	), weight_cte2 as (
+		SELECT
+			politician, ticker, SUM(shares_purchase) shares_purchase, SUM(shares_sale) shares_sale
+		FROM
+			weight_cte
+		GROUP BY
+			1,2
+	), weight_cte3 as (
+		SELECT
+			politician, ticker, CASE WHEN SUM(shares_purchase + shares_sale) < 0 or SUM(shares_purchase + shares_sale) is NULL THEN SUM(shares_purchase) ELSE SUM(shares_purchase + shares_sale) END shares
+		FROM
+			weight_cte2
+		GROUP BY
+			1,2
+	), final_weight as (
+	SELECT
+		politician, ticker, shares, SUM(shares) OVER (PARTITION BY politician ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) total_shares,
+		ROUND((shares / SUM(shares) OVER (PARTITION BY politician ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)),2) weighted_percentage
+	FROM
+		weight_cte3
+-- Below is the formula/ctes to find the return of tickers that politicians have sold a partial amount of 
+	-- The formula is (total_amount_sold + (remaining shares * current price) - total_amount_purchase / total_amount_purchase)
+		-- Remaining shares is shares left after selling and current price is the close price of a ticker at the max ticker_date
+	), sale_cte as (
+		SELECT
+			t.politician, t.ticker, t.transaction_type, MAX(s.ticker_date) max_date,
+			SUM(CASE WHEN t.transaction_type = 'purchase' THEN (t.amount / s.close) END) shares_purchase,
+			SUM(CASE WHEN t.transaction_type = 'sale' THEN (t.amount / s.close) END) shares_sale,
+			SUM(CASE WHEN t.transaction_type = 'purchase' THEN amount END) total_amount_purchase,
+			SUM(CASE WHEN t.transaction_type = 'sale' THEN -amount END) total_amount_sale
+		FROM
+			trades t
+		JOIN
+			stock_prices s on s.ticker = t.ticker and s.ticker_date = t.transaction_date
+		GROUP BY
+			1,2,3
+		ORDER BY
+			t.ticker
+	), sale_cte2 as (
+		SELECT
+			politician, ticker, MAX(max_date) max_date, 
+			SUM(total_amount_purchase) total_amount_purchase, 
+			SUM(total_amount_sale) total_amount_sale, 
+			SUM(shares_purchase) shares_purchase,
+			SUM(shares_sale) shares_sale
+		FROM
+			sale_cte
+		GROUP BY
+			1,2
+	), sale_cte3 as (
+		SELECT
+			politician, ticker, max_date, total_amount_purchase, total_amount_sale, shares_purchase, shares_sale,
+			(shares_purchase - shares_sale) remaining_shares
+		FROM
+			sale_cte2
+	), final_sale_return as (
+		SELECT
+			sale_cte3.politician, sale_cte3.ticker, ((total_amount_sale + (remaining_shares * s.close) - total_amount_purchase) / total_amount_purchase) weighted_return
+		FROM
+			sale_cte3
+		JOIN
+			stock_prices s on s.ticker = sale_cte3.ticker and s.ticker_date = sale_cte3.max_date
+-- Below is the formula/ctes to find the return of tickers that politicians that purchased of and have not sold
+	-- The formula is ((count_of_shares * current price) - total_amount_purchase / total_amount_purchase)
+		-- Count of shares is total number of shares purchased and current price is the close price of a ticker at the max ticker_date
+	), purchase_cte as (
+		SELECT DISTINCT
+			total_transaction.politician, total_transaction.ticker
+		FROM
+			(SELECT politician, ticker, COUNT(*) total_ticker_transactions FROM trades GROUP BY politician, ticker) total_transaction
+		LEFT JOIN
+			(SELECT politician, ticker, COUNT(*) total_purchase_transactions FROM trades WHERE transaction_type = 'purchase' GROUP BY politician, ticker) purchase_transaction
+			ON total_transaction.ticker = purchase_transaction.ticker
+		WHERE
+			total_transaction.total_ticker_transactions = purchase_transaction.total_purchase_transactions
+	), purchase_cte2 as (
+		SELECT
+			t.politician, t.ticker, t.transaction_type, MAX(s.ticker_date) max_date,
+			SUM(CASE WHEN t.transaction_type = 'purchase' THEN (t.amount / s.close) END) shares_purchase,
+			SUM(CASE WHEN t.transaction_type = 'purchase' THEN amount END) total_amount_purchase
+		FROM
+			purchase_cte c
+		JOIN
+			trades t ON t.ticker = c.ticker and c.politician = t.politician
+		JOIN
+			stock_prices s ON s.ticker = c.ticker
+		GROUP BY
+			1,2,3
+	), purchase_cte3 as (
+		SELECT	
+			purchase_cte2.politician, purchase_cte2.ticker, max_date, shares_purchase, total_amount_purchase, s.close price
+		FROM
+			purchase_cte2 
+		JOIN
+			stock_prices s ON s.ticker_date = purchase_cte2.max_date and s.ticker = purchase_cte2.ticker 
+	), final_purchase_return as (
+		SELECT
+			politician, ticker, ((((shares_purchase * price) - total_amount_purchase) / total_amount_purchase) * 100) return
+		FROM
+			purchase_cte3
+-- Below is the formula/ctes to find the return of tickers that politicians sold off all of
+	-- The formula is ((total_amount_sale - total_amount_purchase / total_amount_purchase)
+		SELECT
+			t.politician, t.ticker, t.transaction_type,
+			SUM(CASE WHEN t.transaction_type = 'purchase' THEN (t.amount / s.close) END) shares_purchase,
+			SUM(CASE WHEN t.transaction_type = 'sale' THEN -(t.amount / s.close) END) shares_sale
+		FROM
+			trades t 
+		JOIN
+			stock_prices s on t.ticker = s.ticker and t.transaction_date = s.ticker_date
+		GROUP BY
+			1,2,3
+	), politicians_all_sold_cte2 as (
+		SELECT
+			politician, ticker, SUM(shares_purchase) shares_purchase, SUM(shares_sale) shares_sale
+		FROM
+			politicians_all_sold_cte
+		GROUP BY
+			1,2
+	), politicians_all_sold_cte3 as (
+		SELECT
+			politician
+		FROM
+			politicians_all_sold_cte2
+		GROUP BY
+			1
+		HAVING
+			SUM(shares_purchase + shares_sale) <= 0
+	), politcians_sold_all_return as (
+		SELECT
+			p.politician, t.ticker, t.transaction_type, SUM(t.amount) total_amount
+		FROM
+			trades t 
+		JOIN
+			politicians_all_sold_cte3 p on p.politician = t.politician
+		GROUP BY
+			1,2,3
+	), politcians_sold_all_return2 as (
+		SELECT
+			politician, ticker, SUM(CASE WHEN transaction_type = 'purchase' THEN total_amount  ELSE 0 END)::numeric total_purchase_amount,
+			SUM(CASE WHEN transaction_type = 'sale' THEN total_amount ELSE 0 END)::numeric total_sale_amount
+		FROM
+			politcians_sold_all_return
+		GROUP BY
+			1,2
+	), politcians_sold_all_return_final as (
+		SELECT
+			politician, ticker, ((total_sale_amount - total_purchase_amount) / total_purchase_amount) return_all_sales
+		FROM
+			politcians_sold_all_return2
+	), politcians_sold_all_return_weight as (
+		SELECT
+			p.politician, p.ticker, p.return_all_sales, f.weighted_percentage
+		FROM
+			politcians_sold_all_return_final p 
+		JOIN
+			final_weight f on f.politician = p.politician and f.ticker = p.ticker
+	), politcians_sold_all_final_return as (
+		SELECT
+			politician, SUM(return_all_sales * weighted_percentage) final_return
+		FROM	
+			politcians_sold_all_return_weight
+		GROUP BY
+			1
+	), final_return as (
+		SELECT
+			s.politician, s.ticker,
+			COALESCE(s.weighted_return, p.return) weighted_return
+		FROM
+			final_sale_return s
+		LEFT JOIN
+			final_purchase_return p on s.ticker = p.ticker and s.politician = p.politician
+	), final_cte as (
+		SELECT
+			r.politician, r.ticker, weighted_return, weighted_percentage
+		FROM
+			final_return r
+		JOIN
+			final_weight w ON r.ticker = w.ticker
+	), final_cte2 as (
+		SELECT
+			politician, SUM(weighted_return * weighted_percentage) final_return
+		FROM
+			final_cte
+		GROUP BY
+			1 
+	), final_cte3 as (
+		SELECT
+			politician
+		FROM
+			final_cte2
+		EXCEPT
+		SELECT 
+			politician
+		FROM
+			politcians_sold_all_final_return
+	)
+	SELECT
+		f.politician, final_return
+	FROM
+		final_cte3 f
+	JOIN
+		final_cte2 f1 on f.politician = f1.politician
+	UNION
+	SELECT
+		politician, final_return
+	FROM
+		politcians_sold_all_final_return
+	)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
